@@ -1,70 +1,67 @@
-# Branching TSP
+# Branching-TSP
 
-Trying out a different way of doing TSP, and seeing how it stacks up against the usual greedy nearest-neighbor heuristic.
+A comparison between plain greedy nearest-neighbor pathfinding and a **tolerance-pruned branching search** for approximating the Traveling Salesman Problem, with an empirical benchmark measuring both solution quality and runtime.
 
-## The idea
+## The core idea
 
-Greedy nearest neighbor is the standard cheap-and-cheerful TSP heuristic: at every step, go to the closest unvisited point. It runs fast, it's easy, and it gets trapped easily. Once it commits to a near point, there's no going back, and that one commitment can cost you the rest of the tour.
+Greedy nearest-neighbor pathfinding always jumps to the single closest unvisited point. It's fast, but it's known to make locally-good decisions that lead to globally bad tours — committing early to a "closest" point can leave you stranded with long detours later.
 
-The approach in `optimal path.py` softens that. Instead of always picking *the* nearest point, it picks *every* point that's "close enough" to the nearest one and explores all of those as separate branches. "Close enough" is controlled by a single knob:
+This project explores a middle ground: instead of committing to only the single nearest point at each step, keep **every candidate within a tolerance factor of the nearest one**, and explore all of them as separate branches. Once a branch runs out of points, it's a completed candidate path. At the end, the completed path with the lowest total cost wins.
 
-```
-tolerance = 1.0   →   pure greedy
-tolerance = 2.0   →   also explore any point up to 2× the nearest squared distance
-tolerance = 5.0   →   wider still
-```
+`tolerance` is the key dial:
+- `tolerance ≈ 1` → collapses to plain greedy nearest-neighbor (only the single closest candidate survives the filter)
+- Large `tolerance` → approaches exhaustive search over all point orderings, and the search tree grows exponentially
 
-Each branch runs all the way to a complete tour, and the cheapest one wins. So instead of one path, you generate a tree of partial paths and let the structure of the problem decide where it's worth spreading out.
-
-It's basically depth-first beam search where the beam width is decided dynamically at every node by the cost-ratio threshold, rather than being a fixed number.
-
-All costs are summed squared distance, no sqrt. Cheaper to compute and orders paths the same way for picking the minimum.
+> **Note on naming:** despite the filename, this is **not** a guaranteed-optimal TSP solver. True branch-and-bound TSP relies on a mathematically justified lower bound (e.g. an MST-based bound) to *prove* a branch can't beat the current best before discarding it. This algorithm prunes using a tunable distance-ratio heuristic instead, which is effective but can still discard the true optimal path if it doesn't look locally competitive at some step. It's more accurately described as a **tolerance-pruned branching / bounded beam search** than an optimal solver.
 
 ## Files
 
-`optimal path.py` is the main thing. It builds a random 20-node graph, runs both the branching search and plain greedy on it, and plots both tours side by side so you can see where the branching version actually does something different.
-
-`unoptimizedPathFinding.py` is the plain greedy version on its own, with the matplotlib viz. Useful as a sanity-check starting point. This is also the reference algorithm the new approach is being compared against.
-
-`pathingBenchmarkl.py` runs both approaches 10 times on fresh random graphs and plots cost and runtime per iteration, for a couple of tolerance values. This is where you go to see whether the extra work is actually buying you better tours, and how much it costs you in time.
-
-## Running it
-
 ```
-pip install numpy matplotlib
-python "optimal path.py"
+Branching-TSP/
+├── unoptimizedPathFinding.py   # Plain greedy nearest-neighbor baseline, standalone demo
+├── optimal path.py             # Side-by-side demo: greedy vs. branching search, same point set
+└── pathingBenchmark.py         # Empirical benchmark across multiple tolerance values, 10 trials
 ```
 
-(The space in the filename needs quotes from the shell. Or rename it to `optimal_path.py` and move on with your life.)
+## How the branching search works (`savedState`)
 
-## How `savedState` works
+Each `savedState` represents one partially-built path:
 
-This class is the workhorse of the branching search. Each instance is a snapshot of one partial tour:
+- The remaining unvisited points (`X`, `Y`)
+- The current position (`source`)
+- The cumulative cost so far (`cost`)
+- The path taken to get here (`visited`)
 
-* `X`, `Y` are the still-unvisited points
-* `source` is where the agent currently sits
-* `cost` is the accumulated squared distance so far
-* `visited` is the ordered list of points already taken
-* `toVisit` is the candidates that the search is allowed to branch into from `source`
+On creation, it scans the remaining points, finds the nearest one, and keeps every point within `tolerance × nearestCost` as a candidate (`toVisit`) to branch into next.
 
-When `scan()` runs, it computes squared distances from `source` to every unvisited point, finds the minimum, and keeps everything within `min_cost * tolerance` of it. Those become the branch candidates.
+The main loop is an explicit stack-based DFS: pop a state, branch into every one of its `toVisit` candidates (pushing a new `savedState` for each), and repeat until every branch has been fully explored. All fully-explored (leaf) states are collected, and the lowest-cost one is the answer.
 
-The main loop pops a state off the stack, branches it into children (one new `savedState` per candidate), and pushes the children back on. If a state has no candidates left, that path is done and gets dropped into `completedPaths`. When the stack empties, the run is over and you scan `completedPaths` for the cheapest one.
+## Benchmark methodology (`pathingBenchmark.py`)
 
-## Notes
+For 10 randomized trials (9 points each):
+1. Run the plain greedy baseline, record its total cost and time
+2. Run the branching search at `tolerance = 8`, record cost and time
+3. Run the branching search at `tolerance = 10`, record cost and time
+4. Plot cost and time for all three across all 10 trials
 
-The benchmark currently runs tolerances of 8 and 10 (two more blocks at 2.065 and 2.1 are commented out). On 9-node graphs at tolerance 10 you're already generating a lot of states, so don't crank it higher without watching memory.
+This gives a real cost/speed tradeoff comparison rather than a single anecdotal result — costs are consistently measured in squared distance throughout (avoiding unnecessary `sqrt` calls, since argmin is unaffected by that monotonic transform).
 
-`DEFAULT_TOLERANCE = 5` in `optimal path.py` is reasonable for 20 nodes. Past about 6 or 7 the runtime climbs sharply.
+## Running
 
-Squared distance is the cost everywhere. If you want real Euclidean tour length, sqrt each leg before summing. The branching itself doesn't care about the metric as long as it's monotonic in distance, but if you compare costs across algorithms keep them using the same one.
+```bash
+python "unoptimizedPathFinding.py"   # Greedy baseline only, 19 points, animated arrows
+python "optimal path.py"             # Greedy vs. branching search, side-by-side plot, 19 points
+python pathingBenchmark.py           # Full benchmark: cost & time across tolerances, 10 trials
+```
 
-The mask in the main loop assumes no duplicate point coordinates. With random floats that's effectively always true, but with real data containing overlapping points it would need to use indices instead of value comparison.
+Requires `matplotlib` and `numpy`.
 
-## Possible next steps
+## Known issues / fragility
 
-* Memoize on (visited set, current source) so identical subproblems don't get re-explored
-* Best-first ordering of the stack so high-promise paths finish first and bound the rest
-* A real lower bound (MST, 1-tree) to prune branches that can't beat the current best completed tour
-* Replace the linear `calcCost` scan with a kdtree for larger node counts
-* Make the tolerance shrink with depth — early decisions matter more, so let them branch wider
+- Branches identify "the point just visited" via **exact float equality** (`currState.X == visiting[0]`). This works because coordinates are only ever copied, never recomputed, so bit-for-bit equality holds in practice — but it's inherently fragile if two points ever land on identical coordinates.
+- The branching search's runtime grows quickly with both node count and `tolerance` — the benchmark tests only 9 points for the branching search vs. 19 for the plain greedy demo, likely for exactly this reason.
+
+## Roadmap
+
+- [ ] Replace float-equality point matching with index-based tracking, to remove the fragility around duplicate coordinates
+- [ ] Test at higher node counts to characterize how tolerance vs. runtime actually scales
